@@ -97,6 +97,10 @@ private:
   QScreen* findCurrentScreen();
   QScreen* loadLastScreen();
   void updateForcedScreen();
+#ifdef Q_OS_WIN
+  void applyWindowsFullscreenGeometry(QScreen* screen);
+  void clearWindowsFullscreenRegion();
+#endif
 
   // Settings
   void connectSettings();
@@ -109,12 +113,14 @@ private:
   bool m_enforcingZoom;
   QString m_currentScreenName;
   int m_ignoreFullscreenSettingsChange;
+  bool m_fullScreen;
   bool m_cursorVisible;
   bool m_cursorInsideWindow;
 
   // Window state
   QWindow::Visibility m_previousVisibility;  // State before fullscreen
   QRect m_windowedGeometry;                  // Geometry when in Windowed state
+  Qt::WindowFlags m_windowedFlags;           // Window decorations before fullscreen
   QTimer* m_geometrySaveTimer;               // Debounced disk sync
 
   // initial size tracking to detect if size changed from default

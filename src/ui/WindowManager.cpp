@@ -19,6 +19,10 @@
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 WindowManager& WindowManager::Get()
@@ -34,6 +38,7 @@ WindowManager::WindowManager(QObject* parent)
     m_webView(nullptr),
     m_enforcingZoom(false),
     m_ignoreFullscreenSettingsChange(0),
+    m_fullScreen(false),
     m_cursorVisible(true),
     m_cursorInsideWindow(true),
     m_previousVisibility(QWindow::Windowed),
@@ -64,6 +69,8 @@ void WindowManager::initializeWindow(QQuickWindow* window)
     qCritical() << "WindowManager: Failed to get main window";
     return;
   }
+
+  m_windowedFlags = m_window->flags();
 
   // Initialize components that need window reference
   PlayerComponent::Get().setWindow(m_window);
@@ -212,42 +219,98 @@ bool WindowManager::isWayland() const
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void WindowManager::setFullScreen(bool enable)
 {
-  if (!m_window)
+  if (!m_window || enable == m_fullScreen)
     return;
 
   if (enable)
   {
-    // Use showFullScreen()
+    QWindow::Visibility visibility = m_window->visibility();
+    if (visibility != QWindow::Hidden && visibility != QWindow::FullScreen)
+      m_previousVisibility = visibility;
+
+    if (!(m_window->windowState() & (Qt::WindowMaximized | Qt::WindowFullScreen)))
+      m_windowedGeometry = m_window->geometry();
+
+    // Set the logical state before changing flags/geometry. Those operations emit
+    // window events synchronously, and must not be mistaken for windowed changes.
+    m_fullScreen = true;
+
+#ifdef Q_OS_WIN
+    // Keep Windows in a normal DWM-composited window. Native WindowFullScreen can
+    // temporarily change state on activation changes, causing multi-monitor mode
+    // flicker and feeding spurious values back into the fullscreen setting.
+    m_windowedFlags = m_window->flags();
+    QScreen* targetScreen = findCurrentScreen();
+
+    QString forcedScreen = SettingsComponent::Get().value(SETTINGS_SECTION_MAIN, "forceFSScreen").toString();
+    if (!forcedScreen.isEmpty())
+    {
+      for (QScreen* screen : QGuiApplication::screens())
+      {
+        if (screen->name() == forcedScreen)
+        {
+          targetScreen = screen;
+          break;
+        }
+      }
+    }
+
+    m_window->setWindowState(Qt::WindowNoState);
+    m_window->setFlags(m_windowedFlags | Qt::FramelessWindowHint);
+    if (targetScreen)
+    {
+      m_window->setScreen(targetScreen);
+      applyWindowsFullscreenGeometry(targetScreen);
+    }
+    m_window->show();
+#else
     m_window->showFullScreen();
     updateForcedScreen();
+#endif
   }
   else
   {
+    m_fullScreen = false;
+
+#ifdef Q_OS_WIN
+    clearWindowsFullscreenRegion();
+    m_window->setFlags(m_windowedFlags);
+#endif
+
     // Exit fullscreen: restore to previous state
     qDebug() << "setFullScreen(false): m_previousVisibility=" << m_previousVisibility
              << "(Maximized=" << QWindow::Maximized << ")";
     if (m_previousVisibility == QWindow::Maximized)
     {
-      // show() + showMaximized()
-      qDebug() << "setFullScreen(false): show + showMaximized";
-      m_window->show();
+      qDebug() << "setFullScreen(false): showNormal + showMaximized";
+      m_window->showNormal();
+#ifdef Q_OS_WIN
+      m_window->setGeometry(m_windowedGeometry);
+#endif
       m_window->showMaximized();
     }
     else
     {
       qDebug() << "setFullScreen(false): restoring to windowed";
       m_window->showNormal();
+#ifdef Q_OS_WIN
+      m_window->setGeometry(m_windowedGeometry);
+#endif
     }
   }
+
+
+  SettingsSection* section = SettingsComponent::Get().getSection(SETTINGS_SECTION_MAIN);
+  if (section)
+    section->setValueNoSave("fullscreen", m_fullScreen);
+
+  emit fullScreenSwitched();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 bool WindowManager::isFullScreen() const
 {
-  if (!m_window)
-    return false;
-
-  return m_window->visibility() == QWindow::FullScreen;
+  return m_window && m_fullScreen;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -326,23 +389,32 @@ void WindowManager::onVisibilityChanged(QWindow::Visibility visibility)
   qDebug() << "onVisibilityChanged: visibility=" << visibility
            << "m_previousVisibility=" << m_previousVisibility;
 
+#ifdef Q_OS_WIN
+  // Windows fullscreen is deliberately borderless and remains Windowed from
+  // Qt's perspective. Focus/activation notifications must not alter its
+  // logical fullscreen state or the user setting.
+  bool isFS = m_fullScreen;
+#else
   bool isFS = (visibility == QWindow::FullScreen);
-  bool wasFS = (m_previousVisibility == QWindow::FullScreen);
+#endif
 
   // Kiosk mode: force back to fullscreen if user tried to exit
+#ifndef Q_OS_WIN
   if (!isFS)
   {
     bool forceAlwaysFS = SettingsComponent::Get().value(SETTINGS_SECTION_MAIN, "forceAlwaysFS").toBool();
     if (forceAlwaysFS)
     {
+      m_fullScreen = false;
       setFullScreen(true);
       return;
     }
   }
+#endif
 
   // Track previous visibility (only when NOT fullscreen or hidden)
   // Preserve pre-fullscreen state for restore
-  if (visibility != QWindow::FullScreen && visibility != QWindow::Hidden)
+  if (!m_fullScreen && visibility != QWindow::FullScreen && visibility != QWindow::Hidden)
   {
     qDebug() << "onVisibilityChanged: updating m_previousVisibility from" << m_previousVisibility << "to" << visibility;
     m_previousVisibility = visibility;
@@ -352,15 +424,19 @@ void WindowManager::onVisibilityChanged(QWindow::Visibility visibility)
     qDebug() << "onVisibilityChanged: NOT updating m_previousVisibility (visibility is FS or Hidden)";
   }
 
-  // Update fullscreen setting (in-memory only) when state changes
-  if (isFS != wasFS)
+  // On non-Windows platforms, synchronize fullscreen changes made by the
+  // window manager. Windows uses the explicit logical state above.
+#ifndef Q_OS_WIN
+  if (isFS != m_fullScreen)
   {
+    m_fullScreen = isFS;
     SettingsSection* section = SettingsComponent::Get().getSection(SETTINGS_SECTION_MAIN);
     if (section)
       section->setValueNoSave("fullscreen", isFS);
 
     emit fullScreenSwitched();
   }
+#endif
 
   updateWindowState(false);
 }
@@ -618,7 +694,7 @@ void WindowManager::saveWindowSize()
     return;
 
   bool isMaximized = m_window->windowState() & Qt::WindowMaximized;
-  bool isFullScreen = m_window->windowState() & Qt::WindowFullScreen;
+  bool isFullScreen = this->isFullScreen();
 
   qDebug() << "saveWindowSize: windowState=" << m_window->windowState()
            << "isMaximized=" << isMaximized << "isFullScreen=" << isFullScreen
@@ -692,8 +768,8 @@ void WindowManager::saveWindowPosition()
   if (isWayland())
     return;
 
-  // Skip if maximized
-  if (m_window->windowState() & Qt::WindowMaximized)
+  // Skip if maximized or fullscreen
+  if (isFullScreen() || (m_window->windowState() & Qt::WindowMaximized))
     return;
 
   SettingsSection* section = SettingsComponent::Get().getSection(SETTINGS_SECTION_STATE);
@@ -860,13 +936,59 @@ void WindowManager::updateForcedScreen()
     {
       qDebug() << "Forcing fullscreen to screen:" << forcedScreen;
       m_window->setScreen(screen);
+#ifdef Q_OS_WIN
+      applyWindowsFullscreenGeometry(screen);
+#else
       m_window->setVisibility(QWindow::FullScreen);
+#endif
       return;
     }
   }
 
   qDebug() << "Forced screen not found:" << forcedScreen;
 }
+
+#ifdef Q_OS_WIN
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void WindowManager::applyWindowsFullscreenGeometry(QScreen* screen)
+{
+  if (!m_window || !screen)
+    return;
+
+  // DirectFlip is eligible when the render buffer matches the output dimensions
+  // and the client region covers the output. Render two pixels larger in each
+  // dimension, then clip the native window back to the exact monitor rectangle.
+  // The visible result is fullscreen, but Windows keeps it DWM-composited.
+  QRect screenGeometry = screen->geometry();
+  QRect renderGeometry = screenGeometry.adjusted(-1, -1, 1, 1);
+  m_window->setGeometry(renderGeometry);
+
+  HWND hwnd = reinterpret_cast<HWND>(m_window->winId());
+  HRGN region = CreateRectRgn(1, 1, renderGeometry.width() - 1, renderGeometry.height() - 1);
+  if (!region)
+  {
+    qWarning() << "Failed to create Windows fullscreen clipping region";
+    return;
+  }
+
+  if (!SetWindowRgn(hwnd, region, TRUE))
+  {
+    qWarning() << "Failed to apply Windows fullscreen clipping region";
+    DeleteObject(region);
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void WindowManager::clearWindowsFullscreenRegion()
+{
+  if (!m_window)
+    return;
+
+  HWND hwnd = reinterpret_cast<HWND>(m_window->winId());
+  if (!SetWindowRgn(hwnd, nullptr, TRUE))
+    qWarning() << "Failed to clear Windows fullscreen clipping region";
+}
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void WindowManager::connectSettings()
@@ -907,7 +1029,7 @@ void WindowManager::updateDebugInfo()
   QString infoString;
   QDebug info(&infoString);
   info << "Qt windowing info:\n";
-  info << "  FS: " << m_window->visibility() << "\n";
+  info << "  FS: " << isFullScreen() << " (native visibility: " << m_window->visibility() << ")\n";
   info << "  Geo: " << m_window->geometry() << "\n";
   for (QScreen* scr : QGuiApplication::screens())
   {
