@@ -233,6 +233,7 @@ private:
   // * viewOffset
   //
   void loadWithOptions(const QVariantMap& options);
+  void loadUserMpvConfiguration();
   void setQtQuickWindow(QQuickWindow* window);
   void updatePlaybackState();
   void handleMpvEvent(mpv_event *event);
@@ -246,6 +247,7 @@ private:
   void reselectStream(const QVariant &streamSelection, MediaType target);
 
   MpvController* m_mpv = nullptr;
+  bool m_mpvInitialized = false;
 
   State m_state;
   bool m_paused;

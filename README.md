@@ -25,7 +25,7 @@ Built from the latest commit on `master`.
 See [dev/](dev/) for platform-specific build instructions.
 
 ## File Locations
-Data is stored per-profile in a `profiles/<profile-id>/` subdirectory. The main configuration file is `jellyfin-desktop.conf`. You can also add `mpv.conf` to configure MPV directly.
+Data is stored per-profile in a `profiles/<profile-id>/` subdirectory. The main configuration file is `jellyfin-desktop.conf`. You can also add `mpv.conf` to configure MPV directly and place Lua scripts in `scripts/*.lua`. Jellyfin-managed playback settings take precedence over conflicting options in `mpv.conf`.
 
 **Windows:**
 - Config: `%LOCALAPPDATA%\Jellyfin Desktop\profiles\<profile-id>\`
