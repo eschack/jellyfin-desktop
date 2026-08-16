@@ -233,7 +233,6 @@ private:
   // * viewOffset
   //
   void loadWithOptions(const QVariantMap& options);
-  void loadUserMpvConfiguration();
   void setQtQuickWindow(QQuickWindow* window);
   void updatePlaybackState();
   void handleMpvEvent(mpv_event *event);

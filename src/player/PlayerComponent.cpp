@@ -1,8 +1,6 @@
 #include "PlayerComponent.h"
 #include <QString>
 #include <Qt>
-#include <QDir>
-#include <QFileInfo>
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QDebug>
@@ -16,6 +14,7 @@
 #include "settings/SettingsSection.h"
 
 #include "MpvVideoItem.h"
+#include "MpvConfiguration.h"
 #include "AlbumArtProvider.h"
 #include "input/InputComponent.h"
 #include <MpvController>
@@ -182,7 +181,15 @@ void PlayerComponent::initializeMpv()
   m_mpv->setProperty( "fullscreen", true);
 #endif
 
-  loadUserMpvConfiguration();
+  MpvConfiguration::loadProfile(
+    ProfileManager::activeProfile().dataDir(),
+    [this](const QByteArray& configPath) {
+      return mpv_load_config_file(m_mpv->mpv(), configPath.constData());
+    },
+    [this](const QByteArray& scriptPath) {
+      const char* command[] = {"load-script", scriptPath.constData(), nullptr};
+      return mpv_command(m_mpv->mpv(), command);
+    });
 
   // The embedded renderer requires libmpv even if mpv.conf specifies a
   // different video output.
@@ -237,46 +244,6 @@ void PlayerComponent::initializeMpv()
   emit onMpvEvents();
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-void PlayerComponent::loadUserMpvConfiguration()
-{
-  const QString configPath = ProfileManager::activeProfile().dataDir("mpv.conf");
-  const QFileInfo configFile(configPath);
-
-  if (configFile.isFile())
-  {
-    const QByteArray configPathUtf8 = configFile.absoluteFilePath().toUtf8();
-    const int result = mpv_load_config_file(m_mpv->mpv(), configPathUtf8.constData());
-    if (result < 0)
-      qWarning() << "Failed to load mpv configuration:" << configPath << mpv_error_string(result);
-    else
-      qInfo() << "Loaded mpv configuration:" << configPath;
-  }
-  else
-  {
-    qDebug() << "No profile mpv configuration found at:" << configPath;
-  }
-
-  const QDir scriptsDir(ProfileManager::activeProfile().dataDir("scripts"));
-  const QFileInfoList scripts = scriptsDir.entryInfoList(
-    QStringList() << "*.lua",
-    QDir::Files | QDir::Readable,
-    QDir::Name | QDir::IgnoreCase);
-
-  for (const QFileInfo& script : scripts)
-  {
-    const QString scriptPath = script.absoluteFilePath();
-    const QByteArray scriptPathUtf8 = scriptPath.toUtf8();
-    const char* command[] = {"load-script", scriptPathUtf8.constData(), nullptr};
-    const int result = mpv_command(m_mpv->mpv(), command);
-    if (result < 0)
-      qWarning() << "Failed to load mpv script:" << scriptPath << mpv_error_string(result);
-    else
-      qInfo() << "Loaded mpv script:" << scriptPath;
-  }
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////
 void PlayerComponent::setVideoRectangle(int x, int y, int w, int h)
 {
   QRect rc(x, y, w, h);
